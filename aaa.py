@@ -155,7 +155,7 @@ def calendar_wo_hyouji_suru(year, month):
     calendar_data = calendar_data_wo_seisei_suru(year, month, hyouka_map)
 
     return render_template(
-        'dsds.html',
+        'index.html',
         calendar=calendar_data,
         total_average=heikin_tachi['total_average'],
         weekly_averages=heikin_tachi['weekly_averages']
