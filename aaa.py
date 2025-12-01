@@ -7,7 +7,17 @@ from flask import Flask, render_template, request, jsonify, redirect
 # --- 1. グローバル変数とアプリの初期化 ---
 RATING_FILE = "daily_ratings.csv"  # 評価データを保存するファイル名
 
-# テンプレートフォルダを明示的に指定 
+# 記号評価を数値に変換する辞書
+RATING_SYMBOLS = {
+    "◎": 4,
+    "〇": 3,
+    "△": 2,
+    "×": 1
+}
+
+# 数値 → 記号（必要なら） 
+RATING_NUM_TO_SYMBOL = {v: k for k, v in RATING_SYMBOLS.items()}
+
 app = Flask(
     __name__,
     template_folder="templates",
@@ -17,7 +27,7 @@ app = Flask(
 
 # --- 2. データの読み書き (CSV関連) ---
 def hyouka_map_wo_yomikomu():
-    """CSVファイルから評価データを読み込み、辞書として返す"""
+    """CSVファイルから評価データ（◎,〇,△,×）を読み込み、辞書として返す"""
     hyouka_map = {}
     
     if not os.path.exists(RATING_FILE):
@@ -30,7 +40,9 @@ def hyouka_map_wo_yomikomu():
             
             for row in reader:
                 if len(row) == 2:
-                    hyouka_map[row[0]] = int(row[1]) 
+                    symbol = row[1]
+                    if symbol in RATING_SYMBOLS:
+                        hyouka_map[row[0]] = symbol
     except Exception as e:
         print(f"❌ 評価データの読み込み中にエラーが発生しました: {e}")
         return {}
@@ -39,27 +51,28 @@ def hyouka_map_wo_yomikomu():
 
 
 def hyouka_map_wo_hozon_suru(hyouka_map):
-    """評価データをCSVファイルに書き込む"""
+    """評価データ（◎,〇,△,×）をCSVファイルに書き込む"""
     try:
         with open(RATING_FILE, 'w', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
-            writer.writerow(['日付', '評価点'])
+            writer.writerow(['日付', '評価'])
             
-            for date_str, rating in sorted(hyouka_map.items()):
-                writer.writerow([date_str, rating])
+            for date_str, symbol in sorted(hyouka_map.items()):
+                writer.writerow([date_str, symbol])
         return True
     except Exception as e:
         print(f"❌ CSVファイルへの保存中にエラーが発生しました: {e}")
         return False
 
 
-# --- 3. 平均点の計算 ---
+# --- 3. 平均点の計算（内部で数値化して計算） ---
 def heikinchi_wo_keisan_suru(hyouka_map):
     if not hyouka_map:
         return {'total_average': 0, 'weekly_averages': {}}
 
-    all_ratings = list(hyouka_map.values())
-    total_average = sum(all_ratings) / len(all_ratings) if all_ratings else 0
+    # 記号 → 数値変換して計算
+    all_ratings = [RATING_SYMBOLS[symbol] for symbol in hyouka_map.values()]
+    total_average = sum(all_ratings) / len(all_ratings)
 
     weekly_averages = {}
     
@@ -68,16 +81,17 @@ def heikinchi_wo_keisan_suru(hyouka_map):
         first_date_obj = datetime.datetime.strptime(sorted_dates[0], "%Y-%m-%d").date()
         
         shuu_goto_no_group = defaultdict(list)
-        for date_str, rating in hyouka_map.items():
+        for date_str, symbol in hyouka_map.items():
+            val = RATING_SYMBOLS[symbol]
             date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
             saisho_kara_no_keika_nissu = (date_obj - first_date_obj).days
             shuu_bangou = saisho_kara_no_keika_nissu // 7
-            shuu_goto_no_group[shuu_bangou].append(rating)
+            shuu_goto_no_group[shuu_bangou].append(val)
 
         for shuu_bangou, ratings in shuu_goto_no_group.items():
             shuu_no_kaishibi_obj = first_date_obj + datetime.timedelta(days=shuu_bangou * 7)
-            shuu_no_key = shuu_no_kaishibi_obj.strftime("%Y-%m-%d")
-            weekly_averages[shuu_no_key] = sum(ratings) / len(ratings)
+            key = shuu_no_kaishibi_obj.strftime("%Y-%m-%d")
+            weekly_averages[key] = sum(ratings) / len(ratings)
             
     except Exception as e:
         print(f"エラー: 週間平均の計算中に問題が発生しました: {e}") 
@@ -108,23 +122,22 @@ def calendar_data_wo_seisei_suru(year, month, hyouka_map):
             week.append({
                 'date': date_str,
                 'day': current_date.day,
-                'rating': rating,
+                'rating': rating,  # ◎ / 〇 / △ / × が入る
                 'is_current_month': current_date.month == month 
             })
             current_date += datetime.timedelta(days=1)
         calendar_weeks.append(week)
         
     prev_month = start_of_month - datetime.timedelta(days=1)
-
-    tsugi_no_tsuki_no_hajimari = (start_of_month + datetime.timedelta(days=32)).replace(day=1)
+    next_month = (start_of_month + datetime.timedelta(days=32)).replace(day=1)
 
     return {
         'month_name': f"{year}年{month:02}月",
         'weeks': calendar_weeks,
         'prev_year': prev_month.year,
         'prev_month': prev_month.month,
-        'next_year': tsugi_no_tsuki_no_hajimari.year,
-        'next_month': tsugi_no_tsuki_no_hajimari.month
+        'next_year': next_month.year,
+        'next_month': next_month.month
     }
 
 
@@ -153,23 +166,17 @@ def calendar_wo_hyouji_suru(year, month):
 def hyouka_wo_koushin_suru():
     data = request.json
     date_str = data.get('date')
-    rating_val = data.get('rating')
+    symbol = data.get('rating')  # ◎ / 〇 / △ / × が届く前提
 
-    if not date_str or rating_val is None:
-        return jsonify({'success': False, 'error': '無効なデータが送信されました'}), 400
+    if not date_str or symbol not in RATING_SYMBOLS:
+        return jsonify({'success': False, 'error': '無効な評価記号です（◎,〇,△,×のみ）'}), 400
 
     try:
-        rating_int = int(rating_val)
-        if not (0 <= rating_int <= 5):
-            raise ValueError("評価点の範囲が不正です (0～5)。")
-        
         hyouka_map = hyouka_map_wo_yomikomu()
 
-        if rating_int == 0:
-            hyouka_map.pop(date_str, None)
-        else:
-            hyouka_map[date_str] = rating_int
-        
+        # 設定
+        hyouka_map[date_str] = symbol
+
         if hyouka_map_wo_hozon_suru(hyouka_map):
             heikin_tachi = heikinchi_wo_keisan_suru(hyouka_map)
             return jsonify({
@@ -179,8 +186,6 @@ def hyouka_wo_koushin_suru():
         else:
             return jsonify({'success': False, 'error': 'ファイルの保存に失敗しました'}), 500
             
-    except ValueError as e:
-        return jsonify({'success': False, 'error': str(e)}), 400
     except Exception as e:
         return jsonify({'success': False, 'error': f'サーバーでエラー: {e}'}), 500
 
